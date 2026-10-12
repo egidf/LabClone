@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useStore } from "../state/store";
 import type { Snapshot } from "../state/store";
 import { engine } from "../audio/engine";
@@ -124,6 +124,7 @@ function Strip({ track }: { track: Track }) {
 }
 
 function MasterStrip() {
+  const [vol, setVol] = useState(0.95);
   return (
     <div className="channel-strip master-strip">
       <div className="ch-name">MASTER</div>
@@ -133,19 +134,23 @@ function MasterStrip() {
           className="v-fader"
           type="range"
           min={0}
-          max={1}
+          max={1.2}
           step={0.01}
-          defaultValue={0.95}
+          value={vol}
           title="Master Volume"
-          onChange={() => {}}
+          onChange={(e) => {
+            const v = Number(e.target.value);
+            setVol(v);
+            engine.setMasterGain(v);
+          }}
         />
       </div>
-      <div className="strip-value">95</div>
+      <div className="strip-value">{Math.round((vol / 1.2) * 100)}</div>
       <div className="pan-row">
         <span>STEREO</span>
       </div>
       <div className="ch-buttons">
-        <span style={{ color: "var(--muted)", fontSize: 9, fontWeight: 700 }}>LIMITER</span>
+        <span style={{ color: "var(--accent)", fontSize: 10, fontWeight: 800 }}>LIMITER</span>
       </div>
     </div>
   );

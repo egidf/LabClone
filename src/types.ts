@@ -42,6 +42,27 @@ export interface TrackEffects {
   eqMid: number; // dB -24..24
   eqHigh: number; // dB -24..24
   compress: boolean;
+  drive?: number; // 0..100
+  chorusDepth?: number; // 0..100
+  chorusSpeed?: number; // 0..100
+  delayFeedback?: number; // 0..100
+  delayTime?: string | number; // "1/16 beat"
+  delayHp?: number; // 20..500
+  delayLp?: number; // 1000..16000
+  stereoSpread?: number; // 0..100
+  reverbMix?: number; // 0..100
+  reverbSize?: number; // 0..100
+  reverbTone?: number; // 0..100
+}
+
+export interface RackUnit {
+  id: string;
+  name: string;
+  enabled: boolean;
+  type: "chorus" | "delay" | "stereo" | "reverb" | "compressor" | "generic" | "lsp";
+  lspPluginId?: string;
+  color?: string;
+  params: Record<string, number | string>;
 }
 
 export interface Track {
@@ -59,6 +80,7 @@ export interface Track {
   reverbSend: number; // 0..1
   delaySend: number; // 0..1
   effects: TrackEffects;
+  effectsRack?: RackUnit[];
 }
 
 export interface LoopDef {

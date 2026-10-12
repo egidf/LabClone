@@ -1,42 +1,26 @@
 import { useEffect } from "react";
 import { TopBar } from "./components/TopBar";
-import { TransportBar } from "./components/TransportBar";
 import { LoopLibrary } from "./components/LoopLibrary";
 import { Timeline } from "./components/Timeline";
 import { MixerPanel } from "./components/Mixer";
 import { EffectsPanel } from "./components/EffectsPanel";
+import { InstrumentPanel } from "./components/InstrumentPanel";
+import { MasteringDrawer } from "./components/MasteringDrawer";
 import { MasteringPanel } from "./components/MasteringPanel";
 import { PianoRoll } from "./components/PianoRoll";
+import { BottomDock } from "./components/BottomDock";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+import { LspPluginsSuite } from "./components/LspPluginsSuite";
 import { useStore } from "./state/store";
 import { engine } from "./audio/engine";
 import { initTransport, playToggle, stopAll, toggleRecord } from "./state/transport";
-
-function Statusbar() {
-  const tracks = useStore((s) => s.tracks);
-  const clips = useStore((s) => s.clips);
-  const bpm = useStore((s) => s.tempo);
-  const leftOpen = useStore((s) => s.leftPanelOpen);
-  const panel = useStore((s) => s.bottomPanel);
-  return (
-    <div className="statusbar">
-      <span>{tracks.length} tracks</span>
-      <span>{clips.length} clips</span>
-      <span>{bpm} BPM · 4/4</span>
-      <span style={{ flex: 1 }} />
-      <span>
-        Space: play · R: record · Del: hapus clip · Ctrl+Z: undo · klik kanan clip: hapus
-      </span>
-      <span>{leftOpen ? "Loops ✓" : ""}</span>
-      <span>{panel !== "none" ? panel : ""}</span>
-    </div>
-  );
-}
+import { LOOP_LIBRARY } from "./audio/loops";
 
 export default function App() {
   const tracks = useStore((s) => s.tracks);
   const bottomPanel = useStore((s) => s.bottomPanel);
   const leftPanelOpen = useStore((s) => s.leftPanelOpen);
+  const masteringOpen = useStore((s) => s.masteringOpen);
   const toast = useStore((s) => s.toast);
 
   // boot: engine <-> store wiring, seed starter tracks, shortcuts
@@ -48,15 +32,49 @@ export default function App() {
 
     const s = useStore.getState();
     if (s.tracks.length === 0) {
-      s.addTrack("instrument", "drums");
-      s.addTrack("instrument", "piano");
-      s.addTrack("audio");
-      useStore.setState({ selectedTrackId: useStore.getState().tracks[1].id });
+      // Seed tracks matching BandLab Screenshot
+      s.setProjectName("Mouse Trap - Bright - Oct 11, 2026, 2:27 AM");
+      s.setTempo(126);
+
+      const t1 = s.addTrack("instrument", "piano"); // 01 Melody
+      const t2 = s.addTrack("audio"); // 02 Voice/Audio
+      const t3 = s.addTrack("instrument", "pluck"); // 03 Chords
+      const t4 = s.addTrack("instrument", "bass"); // 04 Bass
+      const t5 = s.addTrack("instrument", "drums"); // 05 Drums
+      const t6 = s.addTrack("audio"); // 06 Voice/Audio
+
+      s.updateTrack(t1, { name: "01 Melody", color: "#c68a18" }, false);
+      s.updateTrack(t2, { name: "02 Voice/Audio", color: "#7c3aed" }, false);
+      s.updateTrack(t3, { name: "03 Chords", color: "#c2410c" }, false);
+      s.updateTrack(t4, { name: "04 Bass", color: "#059669" }, false);
+      s.updateTrack(t5, { name: "05 Drums", color: "#0891b2" }, false);
+      s.updateTrack(t6, { name: "06 Voice/Audio", color: "#7c3aed" }, false);
+
+      // Seed clips
+      const spb = 60 / 126;
+      const leadLoop = LOOP_LIBRARY.find((l) => l.id === "synth-lead") ?? LOOP_LIBRARY[0];
+      const chordsLoop = LOOP_LIBRARY.find((l) => l.id === "key-chords") ?? LOOP_LIBRARY[1];
+      const bassLoop = LOOP_LIBRARY.find((l) => l.id === "bass-funky") ?? LOOP_LIBRARY[2];
+      const drumLoop = LOOP_LIBRARY.find((l) => l.id === "drm-trap") ?? LOOP_LIBRARY[0];
+
+      // Add looped clips across bars 1 to 16
+      for (let bar = 0; bar < 4; bar++) {
+        const atSec = bar * 4 * spb;
+        s.addLoopClip(leadLoop, t1, atSec);
+        s.addLoopClip(chordsLoop, t3, atSec);
+        s.addLoopClip(bassLoop, t4, atSec);
+        s.addLoopClip(drumLoop, t5, atSec);
+      }
+
+      s.setLoop(true, 0, 16);
+      useStore.setState({ selectedTrackId: t1, bottomPanel: "fx" });
     }
 
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
-      if (target.tagName === "INPUT" || target.tagName === "TEXTAREA") return;
+      if (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT") {
+        return;
+      }
       const st = useStore.getState();
       if (e.code === "Space") {
         e.preventDefault();
@@ -92,13 +110,28 @@ export default function App() {
   }, [tracks]);
 
   return (
-    <div className="app">
+    <div className="bandlab-app">
       <TopBar />
-      <TransportBar />
-      <div className="main">
+      <div className="bandlab-main-viewport">
         {leftPanelOpen && <LoopLibrary />}
         <Timeline />
+        {masteringOpen && <MasteringDrawer />}
       </div>
+
+      {/* Dynamic bottom drawer panel */}
+      {bottomPanel === "instrument" && <InstrumentPanel />}
+      {bottomPanel === "fx" && (
+        <ErrorBoundary>
+          <EffectsPanel />
+        </ErrorBoundary>
+      )}
+      {bottomPanel === "lsp" && (
+        <ErrorBoundary>
+          <LspPluginsSuite />
+        </ErrorBoundary>
+      )}
+      {bottomPanel === "piano" && <PianoRoll />}
+      {bottomPanel === "mastering" && <MasteringPanel />}
       {bottomPanel === "mixer" && (
         <div className="bottom-panel">
           <div className="bottom-head">
@@ -117,14 +150,9 @@ export default function App() {
           <MixerPanel />
         </div>
       )}
-      {bottomPanel === "fx" && (
-        <ErrorBoundary>
-          <EffectsPanel />
-        </ErrorBoundary>
-      )}
-      {bottomPanel === "mastering" && <MasteringPanel />}
-      {bottomPanel === "piano" && <PianoRoll />}
-      <Statusbar />
+
+      {/* Footer bottom dock */}
+      <BottomDock />
       {toast && <div className="toast">{toast}</div>}
     </div>
   );

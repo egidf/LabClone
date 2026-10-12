@@ -22,7 +22,7 @@ export interface Snapshot {
   clips: Clip[];
 }
 
-export type BottomPanel = "none" | "loops" | "mixer" | "fx" | "mastering" | "piano";
+export type BottomPanel = "none" | "loops" | "mixer" | "fx" | "mastering" | "piano" | "instrument" | "lsp";
 
 interface Store extends Snapshot {
   // transport / ui
@@ -38,6 +38,7 @@ interface Store extends Snapshot {
   snapDiv: number; // snap resolution in beats (0.25 = 16th note)
   bottomPanel: BottomPanel;
   leftPanelOpen: boolean;
+  masteringOpen: boolean;
   toast: string | null;
 
   // history
@@ -72,6 +73,8 @@ interface Store extends Snapshot {
   setSnapDiv: (v: number) => void;
   setBottomPanel: (p: BottomPanel) => void;
   toggleLeftPanel: () => void;
+  toggleMastering: () => void;
+  setMasteringOpen: (v: boolean) => void;
   showToast: (msg: string | null) => void;
   undo: () => void;
   redo: () => void;
@@ -92,7 +95,23 @@ function makeTrack(kind: Track["kind"], instrument: InstrumentId, index: number)
     monitor: kind === "audio",
     reverbSend: 0.12,
     delaySend: 0,
-    effects: { eqLow: 0, eqMid: 0, eqHigh: 0, compress: false },
+    effects: {
+      eqLow: 0,
+      eqMid: 0,
+      eqHigh: 0,
+      compress: false,
+      drive: 0,
+      chorusDepth: 0,
+      chorusSpeed: 50,
+      delayFeedback: 28,
+      delayTime: "1/16 beat",
+      delayHp: 50,
+      delayLp: 8000,
+      stereoSpread: 50,
+      reverbMix: 25,
+      reverbSize: 50,
+      reverbTone: 50,
+    },
   };
 }
 
@@ -136,11 +155,15 @@ export const useStore = create<Store>((set, get) => {
     selectedClipId: null,
     pxPerSec: 40,
     snapDiv: 0.25,
-    bottomPanel: "none",
-    leftPanelOpen: true,
+    bottomPanel: "fx",
+    leftPanelOpen: false,
+    masteringOpen: false,
     toast: null,
     past: [],
     future: [],
+
+    toggleMastering: () => set((s) => ({ masteringOpen: !s.masteringOpen })),
+    setMasteringOpen: (v) => set({ masteringOpen: v }),
 
     setProjectName: (name) => set({ name }),
     setTempo: (bpm) => {

@@ -1,20 +1,46 @@
 import type { Clip, LoopDef, MidiNote, Track } from "../types";
 import { getImpulse, playNote } from "./synth";
+import { LspDspProcessor, auditionPlayer } from "./lspDsp";
 
 const LOOKAHEAD = 0.12; // seconds scheduled ahead
 const STEP_BEATS = 0.25; // scheduler resolution in beats
 
 export interface Channel {
   input: GainNode;
+  driveNode: WaveShaperNode;
+  driveMix: GainNode;
+  driveDry: GainNode;
   low: BiquadFilterNode;
   mid: BiquadFilterNode;
   high: BiquadFilterNode;
+  chorusDelay: DelayNode;
+  chorusDepthNode: GainNode;
+  chorusLfo: OscillatorNode | null;
+  chorusMix: GainNode;
   comp: DynamicsCompressorNode | null;
   bypass: GainNode;
+  lspDsp: LspDspProcessor;
   vol: GainNode;
   pan: StereoPannerNode;
   revSend: GainNode;
   dlySend: GainNode;
+}
+
+function makeDistortionCurve(amount: number) {
+  const k = Math.max(0, amount);
+  const n = 512;
+  const buffer = new ArrayBuffer(n * 4);
+  const curve = new Float32Array(buffer);
+  const deg = Math.PI / 180;
+  for (let i = 0; i < n; ++i) {
+    const x = (i * 2) / n - 1;
+    if (k === 0) {
+      curve[i] = x;
+    } else {
+      curve[i] = ((3 + k * 0.8) * x * 20 * deg) / (Math.PI + k * 0.8 * Math.abs(x));
+    }
+  }
+  return curve;
 }
 
 function buildChannel(
@@ -25,6 +51,21 @@ function buildChannel(
   dlyBus: AudioNode,
 ): Channel {
   const input = ctx.createGain();
+
+  // Drive / Distortion unit
+  const driveNode = ctx.createWaveShaper();
+  driveNode.curve = makeDistortionCurve(0);
+  driveNode.oversample = "2x";
+  const driveMix = ctx.createGain();
+  driveMix.gain.value = 0;
+  const driveDry = ctx.createGain();
+  driveDry.gain.value = 1;
+  const driveSum = ctx.createGain();
+
+  input.connect(driveDry).connect(driveSum);
+  input.connect(driveNode).connect(driveMix).connect(driveSum);
+
+  // 3-Band Parametric EQ
   const low = ctx.createBiquadFilter();
   low.type = "lowshelf";
   low.frequency.value = 200;
@@ -35,6 +76,34 @@ function buildChannel(
   const high = ctx.createBiquadFilter();
   high.type = "highshelf";
   high.frequency.value = 3500;
+
+  driveSum.connect(low).connect(mid).connect(high);
+
+  // Subtle Chorus / Modulation
+  const chorusDelay = ctx.createDelay(0.05);
+  chorusDelay.delayTime.value = 0.025;
+  const chorusDepthNode = ctx.createGain();
+  chorusDepthNode.gain.value = 0;
+  let chorusLfo: OscillatorNode | null = null;
+  if ("createOscillator" in ctx) {
+    try {
+      chorusLfo = (ctx as AudioContext).createOscillator();
+      chorusLfo.frequency.value = 1.5;
+      chorusLfo.connect(chorusDepthNode);
+      chorusDepthNode.connect(chorusDelay.delayTime);
+      chorusLfo.start();
+    } catch {
+      // ignore
+    }
+  }
+  const chorusMix = ctx.createGain();
+  chorusMix.gain.value = 0;
+  const eqSum = ctx.createGain();
+
+  high.connect(eqSum);
+  high.connect(chorusDelay).connect(chorusMix).connect(eqSum);
+
+  // Compressor
   const comp = ctx.createDynamicsCompressor();
   const bypass = ctx.createGain();
   const vol = ctx.createGain();
@@ -42,28 +111,98 @@ function buildChannel(
   const revSend = ctx.createGain();
   const dlySend = ctx.createGain();
 
-  input.connect(low).connect(mid).connect(high);
-  high.connect(comp);
-  high.connect(bypass);
-  comp.connect(bypass);
-  bypass.connect(vol).connect(pan).connect(dest);
+  // Dry/wet for compressor
+  eqSum.connect(comp);
+  eqSum.connect(bypass);
+  const compSum = ctx.createGain();
+  comp.connect(compSum);
+  bypass.connect(compSum);
+
+  // LSP DSP Audio Processor for this channel
+  const lspDsp = new LspDspProcessor(ctx as AudioContext);
+  compSum.connect(lspDsp.input);
+  lspDsp.output.connect(vol).connect(pan).connect(dest);
+
   revSend.connect(revBus);
   dlySend.connect(dlyBus);
   vol.connect(revSend);
   vol.connect(dlySend);
 
-  const ch: Channel = { input, low, mid, high, comp, bypass, vol, pan, revSend, dlySend };
+  const ch: Channel = {
+    input,
+    driveNode,
+    driveMix,
+    driveDry,
+    low,
+    mid,
+    high,
+    chorusDelay,
+    chorusDepthNode,
+    chorusLfo,
+    chorusMix,
+    comp,
+    bypass,
+    lspDsp,
+    vol,
+    pan,
+    revSend,
+    dlySend,
+  };
   updateChannel(ch, track);
   return ch;
 }
 
 function updateChannel(ch: Channel, track: Track) {
-  ch.low.gain.value = track.effects.eqLow;
-  ch.mid.gain.value = track.effects.eqMid;
-  ch.high.gain.value = track.effects.eqHigh;
-  if (ch.comp) ch.comp.threshold.value = track.effects.compress ? -18 : 0;
-  if (ch.comp) ch.comp.ratio.value = track.effects.compress ? 4 : 1;
-  ch.bypass.gain.value = track.effects.compress ? 0 : 1;
+  const fx = track.effects;
+  ch.low.gain.value = fx.eqLow ?? 0;
+  ch.mid.gain.value = fx.eqMid ?? 0;
+  ch.high.gain.value = fx.eqHigh ?? 0;
+
+  // Drive pedal
+  const driveAmount = fx.drive ?? 0;
+  if (driveAmount > 0) {
+    ch.driveNode.curve = makeDistortionCurve(driveAmount);
+    ch.driveMix.gain.value = Math.min(1, driveAmount / 60);
+    ch.driveDry.gain.value = Math.max(0, 1 - driveAmount / 120);
+  } else {
+    ch.driveMix.gain.value = 0;
+    ch.driveDry.gain.value = 1;
+  }
+
+  // Chorus pedal
+  const chorusDepth = fx.chorusDepth ?? 0;
+  if (chorusDepth > 0) {
+    ch.chorusDepthNode.gain.value = (chorusDepth / 100) * 0.008;
+    ch.chorusMix.gain.value = (chorusDepth / 100) * 0.7;
+    if (ch.chorusLfo && fx.chorusSpeed) {
+      ch.chorusLfo.frequency.value = 0.5 + (fx.chorusSpeed / 100) * 4;
+    }
+  } else {
+    ch.chorusMix.gain.value = 0;
+    ch.chorusDepthNode.gain.value = 0;
+  }
+
+  // Compressor
+  if (ch.comp) {
+    ch.comp.threshold.value = fx.compress ? -18 : 0;
+    ch.comp.ratio.value = fx.compress ? 4 : 1;
+  }
+  ch.bypass.gain.value = fx.compress ? 0.3 : 1;
+
+  // Sync LSP plugins from track's effects rack if present
+  if (track.effectsRack) {
+    for (const unit of track.effectsRack) {
+      if (unit.type === "lsp" && unit.lspPluginId) {
+        ch.lspDsp.setPluginBypass(unit.lspPluginId, !unit.enabled);
+        if (unit.enabled) {
+          for (const [pKey, pVal] of Object.entries(unit.params)) {
+            ch.lspDsp.updateParameter(unit.lspPluginId, pKey, Number(pVal));
+          }
+        }
+      }
+    }
+  }
+
   ch.vol.gain.value = track.muted ? 0 : track.volume;
   ch.pan.pan.value = track.pan;
   ch.revSend.gain.value = track.reverbSend;
@@ -72,18 +211,17 @@ function updateChannel(ch: Channel, track: Track) {
 
 function buildMaster(ctx: BaseAudioContext, revBus: AudioNode, dlyBus: AudioNode) {
   const sum = ctx.createGain();
-  const comp = ctx.createDynamicsCompressor();
-  comp.threshold.value = -8;
-  comp.ratio.value = 3;
+  const masterLspDsp = new LspDspProcessor(ctx as AudioContext);
   const out = ctx.createGain();
   out.gain.value = 0.95;
   const analyser = ctx.createAnalyser();
   analyser.fftSize = 1024;
-  sum.connect(comp).connect(out).connect(analyser);
+  sum.connect(masterLspDsp.input);
+  masterLspDsp.output.connect(out).connect(analyser);
   analyser.connect(ctx.destination);
   revBus.connect(sum);
   dlyBus.connect(sum);
-  return { sum, out, analyser };
+  return { sum, out, analyser, masterLspDsp };
 }
 
 interface SchedulingCursor {
@@ -94,6 +232,7 @@ interface SchedulingCursor {
 
 export class AudioEngine {
   ctx: AudioContext | null = null;
+  masterLspDsp: LspDspProcessor | null = null;
   private channels = new Map<string, Channel>();
   private revBus: GainNode | null = null;
   private dlyBus: GainNode | null = null;
@@ -154,15 +293,77 @@ export class AudioEngine {
       dlyBus.connect(delay).connect(dlyFilt).connect(fb).connect(delay);
       dlyFilt.connect(dlyOut);
 
-      const { sum, out, analyser } = buildMaster(ctx, revOut, dlyOut);
+      const { sum, out, analyser, masterLspDsp } = buildMaster(ctx, revOut, dlyOut);
       this.revBus = revBus;
       this.dlyBus = dlyBus;
       this.masterSum = sum;
       this.masterOut = out;
       this.masterAnalyser = analyser;
+      this.masterLspDsp = masterLspDsp;
     }
     if (this.ctx.state === "suspended") void this.ctx.resume();
     return this.ctx;
+  }
+
+  getLspDsp(trackId?: string | null): LspDspProcessor | null {
+    this.ensure();
+    if (!trackId || trackId === "master") return this.masterLspDsp;
+    return this.channels.get(trackId)?.lspDsp ?? this.masterLspDsp;
+  }
+
+  getLspAnalysers(trackId?: string | null) {
+    this.ensure();
+    const dsp = this.getLspDsp(trackId);
+    if (dsp) {
+      return {
+        analyser: dsp.analyser,
+        analyserL: dsp.analyserL,
+        analyserR: dsp.analyserR,
+      };
+    }
+    return {
+      analyser: this.masterAnalyser,
+      analyserL: this.masterAnalyser,
+      analyserR: this.masterAnalyser,
+    };
+  }
+
+  updateLspParam(target: string, pluginId: string, paramId: string, val: number) {
+    this.ensure();
+    const dsp = this.getLspDsp(target);
+    if (dsp) {
+      dsp.updateParameter(pluginId, paramId, val);
+    }
+  }
+
+  setLspBypass(target: string, pluginId: string, bypassed: boolean) {
+    this.ensure();
+    const dsp = this.getLspDsp(target);
+    if (dsp) {
+      dsp.setPluginBypass(pluginId, bypassed);
+    }
+  }
+
+  startAudition(target: string, type: "synth" | "drums" | "bass" | "noise") {
+    const ctx = this.ensure();
+    let dest: AudioNode = this.masterSum!;
+    if (target && target !== "master") {
+      const ch = this.channels.get(target);
+      if (ch) dest = ch.input;
+    }
+    auditionPlayer.start(ctx, dest, type);
+  }
+
+  stopAudition() {
+    auditionPlayer.stop();
+  }
+
+  get isAuditionPlaying() {
+    return auditionPlayer.isPlaying;
+  }
+
+  get auditionType() {
+    return auditionPlayer.activeType;
   }
 
   syncTracks(tracks: Track[]) {
@@ -195,6 +396,15 @@ export class AudioEngine {
   /** register an AudioBuffer under an id */
   addBuffer(id: string, buf: AudioBuffer) {
     this.buffers.set(id, buf);
+  }
+
+  setMasterGain(dbOrGain: number) {
+    this.ensure();
+    if (this.masterOut && this.ctx) {
+      // If negative or <= 6, assume dB; if 0..2 assume linear
+      const linear = dbOrGain <= 3 && dbOrGain >= -40 ? Math.pow(10, dbOrGain / 20) : Math.max(0, dbOrGain);
+      this.masterOut.gain.setTargetAtTime(Math.min(1.5, Math.max(0, linear)), this.ctx.currentTime, 0.02);
+    }
   }
 
   get pos(): number {
